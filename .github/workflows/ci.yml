@@ -13,12 +13,12 @@
 name: Smoke Test
 
 on:
-  push:
-    branches:
-      - 11.0.x
-  pull_request:
-    branches:
-      - 11.0.x
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Run only test classes matching **/<filter>.java (empty = full suite)'
+        required: false
+        default: ''
 
 env:
   LC_ALL: en_US.UTF-8
@@ -34,6 +34,7 @@ jobs:
         os: [ ubuntu-latest ]
     name: JDK${{ matrix.java }} ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
     - name: Git Checkout
       uses: actions/checkout@v4
@@ -42,11 +43,44 @@ jobs:
       with:
         java-version: ${{ matrix.java }}
         distribution: zulu
+    # Build OpenSSL ${tomcat-native-openssl.version} and tomcat-native
+    # ${tomcat-native.version} (build.properties.default) so the JNI [OpenSSL]
+    # test variants run instead of skipping for a missing libtcnative.
+    - name: Build OpenSSL and tomcat-native
+      shell: bash
+      run: |
+        set -euo pipefail
+        OSSL_VER=3.5.5
+        TCN_VER=2.0.14
+        TCN_SHA512=33d626fab35cbfa7398ca90cabd99950c6362ab4e19637012850fd84ecc78184e4c6c975ece92dc8d6461b6a8c2f83221cbc7374ff154422e7722606a4a144c7
+        sudo apt-get update -q
+        sudo apt-get install -y -q libapr1-dev
+        cd "$RUNNER_TEMP"
+        curl -fsSL -o openssl.tar.gz "https://github.com/openssl/openssl/releases/download/openssl-${OSSL_VER}/openssl-${OSSL_VER}.tar.gz"
+        echo "$(curl -fsSL "https://github.com/openssl/openssl/releases/download/openssl-${OSSL_VER}/openssl-${OSSL_VER}.tar.gz.sha256" | awk '{print $1}')  openssl.tar.gz" | sha256sum -c -
+        tar -xzf openssl.tar.gz
+        (cd "openssl-${OSSL_VER}" && ./Configure shared no-tests no-docs --prefix="$RUNNER_TEMP/openssl" --libdir=lib > /dev/null && make -j"$(nproc)" > /dev/null && make install_sw > /dev/null)
+        curl -fsSL -o tcnative.tar.gz "https://archive.apache.org/dist/tomcat/tomcat-connectors/native/${TCN_VER}/source/tomcat-native-${TCN_VER}-src.tar.gz"
+        echo "${TCN_SHA512}  tcnative.tar.gz" | sha512sum -c -
+        tar -xzf tcnative.tar.gz
+        (cd "tomcat-native-${TCN_VER}-src/native" && ./configure --with-apr=/usr/bin/apr-1-config --with-java-home="$JAVA_HOME" --with-ssl="$RUNNER_TEMP/openssl" --prefix="$RUNNER_TEMP/tcnative" > /dev/null && make -j"$(nproc)" > /dev/null && make install > /dev/null)
+        echo "LD_LIBRARY_PATH=$RUNNER_TEMP/openssl/lib:$RUNNER_TEMP/tcnative/lib" >> "$GITHUB_ENV"
+        echo "$RUNNER_TEMP/openssl/bin" >> "$GITHUB_PATH"
+        ls -l "$RUNNER_TEMP/tcnative/lib" "$RUNNER_TEMP/openssl/lib"
     - name: Build
       run: |
-        ant -noinput echoproperties deploy embed test-nio test-status
+        if [ -n "${{ inputs.test-filter }}" ]; then
+          ant -noinput echoproperties deploy embed test-nio test-status "-Dtest.name=**/${{ inputs.test-filter }}.java"
+        else
+          ant -noinput echoproperties deploy embed test-nio test-status
+        fi
       env:
         ANT_OPTS: -Dtest.openssl.exists=false -Dtest.excludePerformance=true -Dtest.profile=smoke
+
+    - name: Test summary
+      if: ${{ !cancelled() }}
+      shell: bash
+      run: python3 -I .github/seal-test-summary.py output/build/logs test
 
     - name: Upload logs
       if: ${{ !cancelled() }}
@@ -57,3 +91,94 @@ jobs:
           hs_err_*.log
           output/build/logs/TEST*.txt
         retention-days: 7
+
+  # The full test suite (upstream's smoke run covers a fixed subset only), split
+  # into legs by package so each leg stays well inside the job time limit.
+  # JDK 25 so the FFM/panama ([OpenSSL-FFM]) test variants run as well.
+  Full_Tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - leg: catalina
+            pattern: 'org/apache/catalina/**/Test*.java'
+          - leg: coyote
+            pattern: 'org/apache/coyote/**/Test*.java'
+          - leg: tomcat
+            pattern: 'org/apache/tomcat/**/Test*.java'
+          - leg: jakarta-el-jasper-juli-naming-util
+            pattern: 'jakarta/**/Test*.java,org/apache/el/**/Test*.java,org/apache/jasper/**/Test*.java,org/apache/juli/**/Test*.java,org/apache/naming/**/Test*.java,util/**/Test*.java'
+    name: Full tests (${{ matrix.leg }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+    - name: Git Checkout
+      uses: actions/checkout@v4
+    - name: Set up Java
+      uses: actions/setup-java@v4
+      with:
+        java-version: '25'
+        distribution: temurin
+    - name: Build OpenSSL and tomcat-native
+      shell: bash
+      run: |
+        set -euo pipefail
+        OSSL_VER=3.5.5
+        TCN_VER=2.0.14
+        TCN_SHA512=33d626fab35cbfa7398ca90cabd99950c6362ab4e19637012850fd84ecc78184e4c6c975ece92dc8d6461b6a8c2f83221cbc7374ff154422e7722606a4a144c7
+        sudo apt-get update -q
+        sudo apt-get install -y -q libapr1-dev
+        cd "$RUNNER_TEMP"
+        curl -fsSL -o openssl.tar.gz "https://github.com/openssl/openssl/releases/download/openssl-${OSSL_VER}/openssl-${OSSL_VER}.tar.gz"
+        echo "$(curl -fsSL "https://github.com/openssl/openssl/releases/download/openssl-${OSSL_VER}/openssl-${OSSL_VER}.tar.gz.sha256" | awk '{print $1}')  openssl.tar.gz" | sha256sum -c -
+        tar -xzf openssl.tar.gz
+        (cd "openssl-${OSSL_VER}" && ./Configure shared no-tests no-docs --prefix="$RUNNER_TEMP/openssl" --libdir=lib > /dev/null && make -j"$(nproc)" > /dev/null && make install_sw > /dev/null)
+        curl -fsSL -o tcnative.tar.gz "https://archive.apache.org/dist/tomcat/tomcat-connectors/native/${TCN_VER}/source/tomcat-native-${TCN_VER}-src.tar.gz"
+        echo "${TCN_SHA512}  tcnative.tar.gz" | sha512sum -c -
+        tar -xzf tcnative.tar.gz
+        (cd "tomcat-native-${TCN_VER}-src/native" && ./configure --with-apr=/usr/bin/apr-1-config --with-java-home="$JAVA_HOME" --with-ssl="$RUNNER_TEMP/openssl" --prefix="$RUNNER_TEMP/tcnative" > /dev/null && make -j"$(nproc)" > /dev/null && make install > /dev/null)
+        echo "LD_LIBRARY_PATH=$RUNNER_TEMP/openssl/lib:$RUNNER_TEMP/tcnative/lib" >> "$GITHUB_ENV"
+        echo "$RUNNER_TEMP/openssl/bin" >> "$GITHUB_PATH"
+        ls -l "$RUNNER_TEMP/tcnative/lib" "$RUNNER_TEMP/openssl/lib"
+    - name: Test
+      run: |
+        if [ -n "${{ inputs.test-filter }}" ]; then
+          TEST_NAME="**/${{ inputs.test-filter }}.java"
+        else
+          TEST_NAME="${{ matrix.pattern }}"
+        fi
+        ant -noinput echoproperties test-nio test-status "-Dtest.name=$TEST_NAME" \
+          -Dtest.threads=4 -Dtest.excludePerformance=true \
+          "-Dtest.apr.loc=$RUNNER_TEMP/tcnative/lib" "-Dtest.openssl.path=$RUNNER_TEMP/openssl/bin/openssl"
+    - name: Test summary
+      if: ${{ !cancelled() }}
+      shell: bash
+      run: python3 -I .github/seal-test-summary.py output/build/logs test
+
+  # Builds the release jar. JDK 21 (< 22) like the published jar, which carries
+  # no org/apache/tomcat/util/net/openssl/panama classes.
+  Release_Jar:
+    name: Release jar
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - name: Git Checkout
+      uses: actions/checkout@v4
+    - name: Set up Java
+      uses: actions/setup-java@v4
+      with:
+        java-version: '21'
+        distribution: temurin
+    - name: Build
+      run: |
+        java -version
+        ant -version
+        ant -noinput embed-jars
+        mkdir -p seal-dist
+        cp output/embed/tomcat-embed-core.jar seal-dist/tomcat-embed-core-11.0.22.jar
+    - name: Upload jar
+      uses: actions/upload-artifact@v4
+      with:
+        name: tomcat-embed-core
+        path: seal-dist/tomcat-embed-core-11.0.22.jar
+        if-no-files-found: error

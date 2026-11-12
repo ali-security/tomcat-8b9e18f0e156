@@ -213,6 +213,9 @@ public class TestServerInfo {
     @Test
     public void testServerInfoOutputWithApr() throws Exception {
         // Only run this test if APR is available
+        // isAprAvailable() only loads libtcnative once an AprLifecycleListener
+        // instance exists, so create one or the test skips with tcnative present
+        new AprLifecycleListener();
         Assume.assumeTrue("APR not available", AprLifecycleListener.isAprAvailable());
 
         String output = captureServerInfoOutput();
@@ -277,6 +280,9 @@ public class TestServerInfo {
     @Test
     public void testAprVersionInfo() throws Exception {
         // Only run if APR is available
+        // isAprAvailable() only loads libtcnative once an AprLifecycleListener
+        // instance exists, so create one or the test skips with tcnative present
+        new AprLifecycleListener();
         Assume.assumeTrue("APR not available", AprLifecycleListener.isAprAvailable());
 
         String output = captureServerInfoOutput();
@@ -314,6 +320,9 @@ public class TestServerInfo {
     @Test
     public void testTomcatNativeVersionWarningWithRealVersion() throws Exception {
         // Only run if APR is available
+        // isAprAvailable() only loads libtcnative once an AprLifecycleListener
+        // instance exists, so create one or the test skips with tcnative present
+        new AprLifecycleListener();
         Assume.assumeTrue("APR not available", AprLifecycleListener.isAprAvailable());
 
         // If APR is available, getTcnVersionWarning() should return non-null if version is old,
