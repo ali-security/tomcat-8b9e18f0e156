@@ -1114,4 +1114,53 @@ public class TestRewriteValve extends TomcatBaseTest {
                 URLDecoder.decode(expectedSegment, StandardCharsets.UTF_8)));
         Assert.assertTrue(body, body.contains("REQUEST-QUERY-STRING: " + expectedQueryString));
     }
+
+    @Test
+    public void testOrCondDoesNotSkipNonOrCond() throws Exception {
+        Tomcat tomcat = getTomcatInstance();
+
+        Context ctx = getProgrammaticRootContext();
+
+        RewriteValve rewriteValve = new RewriteValve();
+        ctx.getPipeline().addValve(rewriteValve);
+
+        rewriteValve.setConfiguration(
+                "RewriteCond %{HTTP_HOST} localhost [OR]\n" +
+                        "RewriteCond %{HTTP_HOST} 127.0.0.1\n" +
+                        "RewriteCond %{REQUEST_URI} ^/admin\n" +
+                "RewriteRule ^(.*) /blocked$1 [R]");
+
+        Tomcat.addServlet(ctx, "snoop", new SnoopServlet());
+        ctx.addServletMappingDecoded("/other", "snoop");
+
+        tomcat.start();
+
+        ByteChunk res = new ByteChunk();
+        int rc = getUrl("http://localhost:" + getPort() + "/other", res, false);
+
+        Assert.assertEquals(HttpServletResponse.SC_OK, rc);
+
+        res.setCharset(StandardCharsets.UTF_8);
+        String body = res.toString();
+        Assert.assertTrue(body, body.contains("REQUEST-URI: /other"));
+    }
+
+    @Test
+    public void testOrCondDoesNotExtendToFollowingCond() throws Exception {
+        // Neither of the OR'd host conditions match so the rule must not be
+        // applied even though the final (AND) condition matches
+        doTestRewrite("RewriteCond %{HTTP_HOST} example.org [OR]\n" +
+                "RewriteCond %{HTTP_HOST} example.com\n" +
+                "RewriteCond %{REQUEST_URI} ^/c/.*\n" +
+                "RewriteRule ^/c/(.*) /c/blocked [L]", "/c/other", "/c/other");
+    }
+
+    @Test
+    public void testOrCondGroupThenAndCond() throws Exception {
+        // Second OR'd host condition and the final (AND) condition match
+        doTestRewrite("RewriteCond %{HTTP_HOST} example.org [OR]\n" +
+                "RewriteCond %{HTTP_HOST} localhost\n" +
+                "RewriteCond %{REQUEST_URI} ^/c/.*\n" +
+                "RewriteRule ^/c/(.*) /c/blocked [L]", "/c/other", "/c/blocked");
+    }
 }
